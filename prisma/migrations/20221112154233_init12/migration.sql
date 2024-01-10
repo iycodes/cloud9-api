@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "Like" ALTER COLUMN "id" DROP DEFAULT;
