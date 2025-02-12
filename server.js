@@ -11,13 +11,14 @@ import {
   validateAccessToken,
   validateRefreshToken,
 } from "./token.js";
-import { sendConfirmationEmail } from "./config.js";
 import bcrypt from "fastify-bcrypt";
 
 import cookie from "@fastify/cookie";
+import { seed } from "./prisma/seed.js";
+import { getTransporter, sendMail } from "./mySMTP.js";
 //
 export const app = fastify();
-const prisma = new PrismaClient();
+const prismaClient = new PrismaClient();
 dotenv.config();
 
 // Registering our middlewares
@@ -78,27 +79,45 @@ app.get(
   "/users",
   //  { onRequest: validateAccessToken },
   async (req, res) => {
-    return await prisma.user.findMany({
+    return await prismaClient.user.findMany({
       // select:{id:true}
     });
   }
 );
-app.get("/user/:id", { onRequest: validateAccessToken }, async (req, res) => {
-  return await commitToDB(
-    prisma.user.findFirst({
-      where: {
-        id: req.params.id,
-      },
-      include: {
-        followedBy: true,
-        following: true,
-        // password: false,
-      },
-    })
-  );
+app.get("/user/me", { onRequest: validateAccessToken }, async (req, res) => {
+  console.log("access token validated, user info is ", req.authInfo);
+  return await prismaClient.user.findFirst({
+    where: {
+      id: req.authInfo,
+    },
+    // select:{id:true}
+  });
+});
+
+app.get;
+app.get(
+  "/user/:id",
+  //  { onRequest: validateAccessToken },
+  async (req, res) => {
+    return await commitToDB(
+      prismaClient.user.findFirst({
+        where: {
+          id: req.params.id,
+        },
+        include: {
+          followedBy: true,
+          following: true,
+          // password: false,
+        },
+      })
+    );
+  }
+);
+app.get("/seed", async () => {
+  return await seed(prismaClient);
 });
 app.post("/signUp", async (req, res) => {
-  const checker = await prisma.user.findFirst({
+  const checker = await prismaClient.user.findFirst({
     where: {
       email: req.body.email,
     },
@@ -106,20 +125,27 @@ app.post("/signUp", async (req, res) => {
   if (checker) {
     return res.send(app.httpErrors.badRequest("Email already exists"));
   } else {
+    console.log("email doesn't exist creating account");
     const token =
       Math.random().toString(36).slice(2) +
       Math.random().toString(36).toUpperCase().slice(2);
 
     try {
-      app.bcrypt.hash(req.body.password, 10).then(async (hash) => {
+      await app.bcrypt.hash(req.body.password, 10).then(async (hash) => {
         const user = await commitToDB(
-          prisma.user.create({
+          prismaClient.user.create({
             data: { ...req.body, password: hash },
           })
         );
+        console.log("user created in db is", user);
         // create token and send verification email
+        req.body.name = user.firstname;
+        req.body.host = req?.headers?.host;
+        req.body.userId = user.id;
+        req.body.email = user.email;
+        req.body.token = token;
         await commitToDB(
-          prisma.user.update({
+          prismaClient.user.update({
             where: {
               email: req.body.email,
             },
@@ -128,22 +154,40 @@ app.post("/signUp", async (req, res) => {
             },
           })
         );
-        sendConfirmationEmail(req.body.name, user.id, token, req);
+        const transporter = getTransporter();
+        // await sendConfirmationEmail(req.body.name, user.id, token, req);
+        await sendMail(transporter, req.body);
+        res.send({ msg: "verification code sent succesfully" });
       });
     } catch (err) {
-      res.send(err);
-      console.log(err);
+      console.log("error =>", err);
+      return res.send(app.httpErrors.internalServerError(""));
     }
   }
 });
 
-app.post("/:userId/send_verification_link", async (req, res) => {
+app.post("/test/send_verification_email", async (req, res) => {
+  console.log("send mail api called");
+  const transporter = getTransporter();
+  try {
+    req.body.name = "a name";
+    req.body.host = req?.headers?.host;
+    req.body.userId = "random Id";
+    await sendMail(transporter, req.body);
+    console.log("body sent in request is ", req.body);
+    return res.send({ message: "Success: email was sent" });
+  } catch (error) {
+    console.log(error);
+    return res.code(500).send("error sending mail");
+  }
+});
+app.post("/send_verification_link/:userId", async (req, res) => {
   console.log("headers ==>>", req.headers);
   const token =
     Math.random().toString(36).slice(2) +
     Math.random().toString(36).toUpperCase().slice(2);
   const user = await commitToDB(
-    prisma.user.update({
+    prismaClient.user.update({
       where: {
         id: req.params.userId,
       },
@@ -152,12 +196,20 @@ app.post("/:userId/send_verification_link", async (req, res) => {
       },
     })
   );
+  console.log("user is", user);
   const name = user.firstname;
   const userId = user.id;
   const email = user.email;
+  req.body = {};
+  req.body.name = user.firstname;
+  req.body.host = req?.headers?.host;
+  req.body.userId = user.id;
+  req.body.email = user.email;
+  req.body.token = token;
 
   try {
-    await sendConfirmationEmail(name, userId, email, token, req);
+    const transporter = getTransporter();
+    await sendMail(transporter, req.body);
     res.send(token);
   } catch (error) {
     res.send(error);
@@ -165,11 +217,12 @@ app.post("/:userId/send_verification_link", async (req, res) => {
 });
 
 app.get("/verify_email/:userId/:token", async (req, res) => {
+  console.log("token in params is ", req.params.token);
   if (req.params.token == "") {
     res.send(app.httpErrors.badRequest("empty params"));
   } else {
     const user = await commitToDB(
-      prisma.user.findFirst({
+      prismaClient.user.findFirst({
         where: {
           id: req.params.userId,
         },
@@ -180,7 +233,7 @@ app.get("/verify_email/:userId/:token", async (req, res) => {
     );
     if (user.confirmationToken == req.params.token) {
       await commitToDB(
-        prisma.user.update({
+        prismaClient.user.update({
           where: {
             id: req.params.userId,
           },
@@ -193,7 +246,7 @@ app.get("/verify_email/:userId/:token", async (req, res) => {
       res.send("email verified");
     } else {
       await commitToDB(
-        prisma.user.update({
+        prismaClient.user.update({
           where: {
             email: req.params.userId,
           },
@@ -203,9 +256,7 @@ app.get("/verify_email/:userId/:token", async (req, res) => {
         })
       );
       res.send(
-        app.httpErrors.badRequest(
-          "link expired, please generate a new verification link"
-        )
+        app.httpErrors.badRequest("please generate a new verification link")
       );
     }
   }
@@ -214,7 +265,7 @@ app.get("/verify_email/:userId/:token", async (req, res) => {
 app.get("/:userId/isEmailVerified", async (req, res) => {
   const userId = req.params.userId;
   const user = await commitToDB(
-    prisma.user.findFirst({
+    prismaClient.user.findFirst({
       where: {
         id: userId,
       },
@@ -232,7 +283,7 @@ app.get(
     const userId = req.decodedUserId;
     // console.log(req);
     const user = await commitToDB(
-      prisma.user.findFirst({
+      prismaClient.user.findFirst({
         where: {
           id: userId,
         },
@@ -261,43 +312,88 @@ app.get(
     }
   }
 );
-app.post("/login", async (req, res) => {
-  // const accessToken = app.jwt.sign({ userId: req.params.userId });
-  const { email, password } = req.body;
-  console.log(`email is ${email} and password is ${password}`);
-  const user = await commitToDB(
-    prisma.user.findFirst({
-      where: {
-        email: email,
-      },
-      // select: {
-      //   id: true,
-      // },
-    })
-  );
-  const hashedPassword = user.password;
+// app.post("/login",  async (req, res) => {
+//   // const accessToken = app.jwt.sign({ userId: req.params.userId });
+//   const { email, password } = req.body;
+//   console.log(`email is ${email} and password is ${password}`);
+//   const user = await commitToDB(
+//     prismaClient.user.findFirst({
+//       where: {
+//         email: email,
+//       },
+//       // select: {
+//       //   id: true,
+//       // },
+//     })
+//   );
 
-  if (!user) {
-    res.code(404).send({ message: "user does not exist" });
-  } else {
-    return app.bcrypt.compare(password, hashedPassword).then((match) => {
-      if (match) {
-        const accessToken = createToken(user, "30s");
-        const refreshToken = createToken(user, "30d");
-        res.cookie("refresh_token", refreshToken, {
-          maxAge: 60 * 60 * 24 * 30, // multiplying by 1000 because its in milliseconds
-          httpOnly: true,
-          // secure: true,
-        });
-        return res.code(200).send({
-          accessToken,
-          userId: user.id,
-        });
-      } else {
-        res.code(401).send("invalid credentials");
-      }
-    });
-  }
+//   if (!user) {
+//     res.code(404).send({ message: "user does not exist" });
+//   } else {
+//     const hashedPassword = user.password;
+//     console.log("user found is ", user);
+//     return app.bcrypt.compare(password, hashedPassword).then((match) => {
+//       if (match) {
+//         const accessToken = createToken(user, "30s");
+//         const refreshToken = createToken(user, "30d");
+//         res.cookie("refresh_token", refreshToken, {
+//           maxAge: 60 * 60 * 24 * 30, // multiplying by 1000 because its in milliseconds
+//           httpOnly: true,
+//           // secure: true,
+//         });
+//         return res.code(200).send({
+//           accessToken,
+//           userId: user.id,
+//         });
+//       } else {
+//         res.code(401).send("invalid credentials");
+//       }
+//     });
+//   }
+// });
+
+app.route({
+  method: "POST",
+  url: "/login",
+  handler: async (req, res) => {
+    // const accessToken = app.jwt.sign({ userId: req.params.userId });
+    const { email, password } = req.body;
+    console.log(`email is ${email} and password is ${password}`);
+    const user = await commitToDB(
+      prismaClient.user.findFirst({
+        where: {
+          email: email,
+        },
+        // select: {
+        //   id: true,
+        // },
+      })
+    );
+
+    if (!user) {
+      res.code(404).send({ message: "user does not exist" });
+    } else {
+      const hashedPassword = user.password;
+      console.log("user found is ", user);
+      return app.bcrypt.compare(password, hashedPassword).then((match) => {
+        if (match) {
+          const accessToken = createToken(user, "1d");
+          const refreshToken = createToken(user, "30d");
+          res.cookie("refresh_token", refreshToken, {
+            maxAge: 60 * 60 * 24 * 30, // multiplying by 1000 because its in milliseconds
+            httpOnly: true,
+            // secure: true,
+          });
+          return res.code(200).send({
+            accessToken,
+            userId: user.id,
+          });
+        } else {
+          res.code(401).send("invalid credentials");
+        }
+      });
+    }
+  },
 });
 app.post("/auth/logout", async (req, res) => {
   const refreshToken = req.cookies["refresh_token"];
@@ -313,7 +409,7 @@ app.post("/auth/logout", async (req, res) => {
 app.delete("/delete_user/:userId", async (req, res) => {
   try {
     await commitToDB(
-      prisma.user.delete({
+      prismaClient.user.delete({
         where: {
           email: req.params.userId,
         },
@@ -326,7 +422,7 @@ app.delete("/delete_user/:userId", async (req, res) => {
 });
 app.get("/posts", async (request, response) => {
   const posts = await commitToDB(
-    prisma.post.findMany({
+    prismaClient.post.findMany({
       include: {
         likes: true,
         broadcasts: true,
@@ -339,7 +435,7 @@ app.get("/posts", async (request, response) => {
 
 app.get("/posts/:id", async (req, res) => {
   return await commitToDB(
-    prisma.post.findUnique({
+    prismaClient.post.findUnique({
       where: {
         id: req.params.id,
       },
@@ -354,7 +450,7 @@ app.get("/posts/:id", async (req, res) => {
 
 app.get("/posts/userId/:id", async (req, res) => {
   return await commitToDB(
-    prisma.post.findMany({
+    prismaClient.post.findMany({
       where: {
         userId: req.params.id,
       },
@@ -362,8 +458,17 @@ app.get("/posts/userId/:id", async (req, res) => {
   );
 });
 app.post("/posts", async (req, res) => {
+  // console.log("waiting 3 seconds");
+
+  // await new Promise((resolve) =>
+  //   setTimeout(() => {
+  //     resolve();
+  //   }, 3000)
+  // );
+  // console.log("waited 3 seconds");
+
   return await commitToDB(
-    prisma.post.create({
+    prismaClient.post.create({
       data: req.body,
     })
   );
@@ -371,7 +476,7 @@ app.post("/posts", async (req, res) => {
 
 app.delete("/post/:id", async (req, res) => {
   return await commitToDB(
-    prisma.post.delete({
+    prismaClient.post.delete({
       where: {
         id: req.params.id,
       },
@@ -379,11 +484,11 @@ app.delete("/post/:id", async (req, res) => {
   );
 });
 app.get("/comments", async (req, res) => {
-  return await commitToDB(prisma.comment.findMany({}));
+  return await commitToDB(prismaClient.comment.findMany({}));
 });
 app.get("/:postId/comments", async (req, res) => {
   return await commitToDB(
-    prisma.comment.findMany({
+    prismaClient.comment.findMany({
       where: {
         postId: req.params.postId,
       },
@@ -406,7 +511,7 @@ app.get("/:postId/comments", async (req, res) => {
 
 app.get("/comment/:commentId", async (req, res) => {
   return await commitToDB(
-    prisma.comment.findFirst({
+    prismaClient.comment.findFirst({
       where: {
         id: req.params.commentId,
       },
@@ -418,7 +523,7 @@ app.get("/comment/:commentId", async (req, res) => {
 });
 app.get("/post/:postId/comment_count", async (req, res) => {
   const comments = await commitToDB(
-    prisma.comment.findMany({
+    prismaClient.comment.findMany({
       where: {
         postId: req.params.postId,
       },
@@ -429,7 +534,7 @@ app.get("/post/:postId/comment_count", async (req, res) => {
 
 app.get("/comment/:commentId/comment_count", async (req, res) => {
   const childComments = await commitToDB(
-    prisma.comment.findMany({
+    prismaClient.comment.findMany({
       where: {
         parentId: req.params.commentId,
       },
@@ -443,7 +548,7 @@ app.post("/posts/:id/comments", async (req, res) => {
   //     return res.send(app.httpErrors.badRequest("Empty Comment.."))
   // } else{
   return await commitToDB(
-    prisma.comment.create({
+    prismaClient.comment.create({
       data: {
         body: req.body.body,
         userId: req.body.userId,
@@ -457,24 +562,24 @@ app.post("/posts/:id/comments", async (req, res) => {
 });
 app.delete("/comment/:id", async (req, res) => {
   return await commitToDB(
-    prisma.comment.delete({
+    prismaClient.comment.delete({
       where: { id: req.params.id },
     })
   );
 });
 
 app.get("/follows", async (req) => {
-  return await commitToDB(prisma.follows.findMany({}));
+  return await commitToDB(prismaClient.follows.findMany({}));
 });
 app.post("/follows", async (req, res) => {
-  const checker = await prisma.follows.findFirst({
+  const checker = await prismaClient.follows.findFirst({
     where: {
       id: req.body.id,
     },
   });
   if (checker) {
     return await commitToDB(
-      prisma.follows.delete({
+      prismaClient.follows.delete({
         where: {
           id: req.body.id,
         },
@@ -483,7 +588,7 @@ app.post("/follows", async (req, res) => {
   }
   if (!checker) {
     return await commitToDB(
-      prisma.follows.create({
+      prismaClient.follows.create({
         data: {
           ...req.body,
         },
@@ -493,42 +598,42 @@ app.post("/follows", async (req, res) => {
 });
 
 app.get("/likes", async (req, res) => {
-  return await prisma.like.findMany({});
+  return await prismaClient.like.findMany({});
 });
 
 app.post("/likes", async (req, res) => {
-  const checker = await prisma.like.findFirst({
+  const checker = await prismaClient.like.findFirst({
     where: {
       id: req.body.id,
     },
   });
   if (checker) {
-    await prisma.like.delete({
+    await prismaClient.like.delete({
       where: {
         id: req.body.id,
       },
     });
   }
   if (!checker) {
-    await prisma.like.create({
+    await prismaClient.like.create({
       data: req.body,
     });
   }
 });
 
 app.get("/broadcastPost", async (req, res) => {
-  return await commitToDB(prisma.broadcastPost.findMany({}));
+  return await commitToDB(prismaClient.broadcastPost.findMany({}));
 });
 
 app.post("/broadcastPost", async (req, res) => {
-  const checker = await prisma.broadcastPost.findFirst({
+  const checker = await prismaClient.broadcastPost.findFirst({
     where: {
       id: req.body.id,
     },
   });
   if (!checker) {
     await commitToDB(
-      prisma.broadcastPost.create({
+      prismaClient.broadcastPost.create({
         data: {
           id: req.body.id,
           postId: req.body.ogPostId,
@@ -537,7 +642,7 @@ app.post("/broadcastPost", async (req, res) => {
       })
     );
     await commitToDB(
-      prisma.post.create({
+      prismaClient.post.create({
         data: {
           id: req.body.id,
           title: "BROADCAST",
@@ -550,12 +655,12 @@ app.post("/broadcastPost", async (req, res) => {
   }
   if (checker) {
     await commitToDB(
-      prisma.broadcastPost.delete({
+      prismaClient.broadcastPost.delete({
         where: { id: req.body.id },
       })
     );
     await commitToDB(
-      prisma.post.delete({
+      prismaClient.post.delete({
         where: { id: req.body.id },
       })
     );
@@ -563,17 +668,17 @@ app.post("/broadcastPost", async (req, res) => {
 });
 
 app.get("/broadcastComment", async () => {
-  return await commitToDB(prisma.broadcastComment.findMany({}));
+  return await commitToDB(prismaClient.broadcastComment.findMany({}));
 });
 app.post("/broadcast_comment", async (req, res) => {
-  const checker = await prisma.broadcastComment.findFirst({
+  const checker = await prismaClient.broadcastComment.findFirst({
     where: {
       id: req.body.id,
     },
   });
   if (!checker) {
     await commitToDB(
-      prisma.broadcastComment.create({
+      prismaClient.broadcastComment.create({
         data: {
           id: req.body.id,
           userId: req.body.userId,
@@ -583,7 +688,7 @@ app.post("/broadcast_comment", async (req, res) => {
     );
 
     await commitToDB(
-      prisma.post.create({
+      prismaClient.post.create({
         data: {
           id: req.body.id,
           title: "BC_COMMENT",
@@ -596,12 +701,12 @@ app.post("/broadcast_comment", async (req, res) => {
   }
   if (checker) {
     await commitToDB(
-      prisma.broadcastComment.delete({
+      prismaClient.broadcastComment.delete({
         where: { id: req.body.id },
       })
     );
     await commitToDB(
-      prisma.post.delete({
+      prismaClient.post.delete({
         where: { id: req.body.id },
       })
     );
@@ -609,7 +714,7 @@ app.post("/broadcast_comment", async (req, res) => {
 });
 
 app.post("/like_comment", async (req, res) => {
-  const checker = await prisma.likeComment.findFirst({
+  const checker = await prismaClient.likeComment.findFirst({
     where: {
       id: req.body.id,
     },
@@ -617,7 +722,7 @@ app.post("/like_comment", async (req, res) => {
 
   if (!checker) {
     return await commitToDB(
-      prisma.likeComment.create({
+      prismaClient.likeComment.create({
         data: {
           id: req.body.id,
           userId: req.body.userId,
@@ -629,7 +734,7 @@ app.post("/like_comment", async (req, res) => {
 
   if (checker) {
     return await commitToDB(
-      prisma.likeComment.delete({
+      prismaClient.likeComment.delete({
         where: {
           id: req.body.id,
         },

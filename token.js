@@ -48,7 +48,7 @@ export const validateAccessToken = (req, res, next) => {
       });
     } else {
       const decodedUserInfo = info.user;
-      req.decodedInfo = decodedUserInfo;
+      req.authInfo = decodedUserInfo;
       return next();
     }
   });
