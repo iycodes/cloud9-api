@@ -23,7 +23,7 @@ export const getTransporter = () => {
 };
 
 export const sendMail = async (transporter, data) => {
-  data.subject = `Verification Code from Transport App`;
+  data.subject = `Verification Code from Cloud9`;
   //   data.name = "a new user";
   //   data.recepientEmail = "fanoroiyanu@gmail.com";
   //   data.code = 3782;

@@ -27,7 +27,8 @@ app.register(jwt, {
 });
 app.register(sensible);
 app.register(cors, {
-  origin: process.env.CLIENT_URL,
+  origin: [process.env.CLIENT_URL, "http://localhost:4173"],
+  // origin: process.env.CLIENT_URL,
   credentials: true,
 });
 app.register(fastifySwagger);
@@ -129,7 +130,10 @@ app.post("/signUp", async (req, res) => {
     const token =
       Math.random().toString(36).slice(2) +
       Math.random().toString(36).toUpperCase().slice(2);
-
+    if (req.body.profileImageSrc == null) {
+      req.body.profileImageSrc =
+        "https://www.pngrepo.com/png/170303/512/avatar.png";
+    }
     try {
       await app.bcrypt.hash(req.body.password, 10).then(async (hash) => {
         const user = await commitToDB(
@@ -154,10 +158,16 @@ app.post("/signUp", async (req, res) => {
             },
           })
         );
+        const accessToken = createToken(user, "1d");
+
         const transporter = getTransporter();
         // await sendConfirmationEmail(req.body.name, user.id, token, req);
         await sendMail(transporter, req.body);
-        res.send({ msg: "verification code sent succesfully" });
+        res.send({
+          accessToken,
+          userId: user.id,
+          msg: "verification code sent succesfully",
+        });
       });
     } catch (err) {
       console.log("error =>", err);
@@ -181,8 +191,8 @@ app.post("/test/send_verification_email", async (req, res) => {
     return res.code(500).send("error sending mail");
   }
 });
-app.post("/send_verification_link/:userId", async (req, res) => {
-  console.log("headers ==>>", req.headers);
+app.get("/send_verification_link/:userId", async (req, res) => {
+  console.log("send_verification_link api called");
   const token =
     Math.random().toString(36).slice(2) +
     Math.random().toString(36).toUpperCase().slice(2);
@@ -196,6 +206,10 @@ app.post("/send_verification_link/:userId", async (req, res) => {
       },
     })
   );
+  if (user.isEmailVerified == true) {
+    res.send({ msg: "email already verified" });
+    return;
+  }
   console.log("user is", user);
   const name = user.firstname;
   const userId = user.id;
@@ -264,6 +278,8 @@ app.get("/verify_email/:userId/:token", async (req, res) => {
 
 app.get("/:userId/isEmailVerified", async (req, res) => {
   const userId = req.params.userId;
+  console.log("IsEmailVerified api called userid is", userId);
+  // await sleep(3);
   const user = await commitToDB(
     prismaClient.user.findFirst({
       where: {
@@ -421,6 +437,8 @@ app.delete("/delete_user/:userId", async (req, res) => {
   }
 });
 app.get("/posts", async (request, response) => {
+  const refreshToken = request.cookies["refresh_token"];
+  console.log("httponly refreshToken is", refreshToken);
   const posts = await commitToDB(
     prismaClient.post.findMany({
       include: {
@@ -772,3 +790,12 @@ app.listen({ port: process.env.PORT, host: "0.0.0.0" }, (err, addr) => {
     process.exit(1);
   }
 });
+
+async function sleep(duration) {
+  return await new Promise((resolve) =>
+    setTimeout(() => {
+      resolve();
+      console.log("waited", duration, "seconds");
+    }, duration * 1000)
+  );
+}
