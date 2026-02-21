@@ -1,3 +1,5 @@
+import "dotenv/config";
+
 import nodemailer from "nodemailer";
 let username;
 let password;
@@ -24,15 +26,13 @@ export const getTransporter = () => {
 
 export const sendMail = async (transporter, data) => {
   data.subject = `Verification Code from Cloud9`;
-  //   data.name = "a new user";
-  //   data.recepientEmail = "fanoroiyanu@gmail.com";
-  //   data.code = 3782;
   data.recepientEmail = data.email;
+  const verificationCode = String(data.code ?? data.token ?? "").trim();
   data.html = `
                  <h1> Email Confirmation </h1>
                <h2> hello ${data.name} </h2>
-               <p>thank you for joining cloud9, Please confirm your email by clicking the link below </p>
-               <p>   <a href="http://${data.host}/verify_email/${data.userId}/${data.token}" >  Click here </a>   </p>
+               <p>thank you for joining cloud9. Use this verification code to activate your account:</p>
+               <p style="font-size: 24px; font-weight: 700; letter-spacing: 2px;">${verificationCode}</p>
               `;
 
   // const mail =
